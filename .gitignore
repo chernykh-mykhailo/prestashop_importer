@@ -1,0 +1,6 @@
+tmp/
+data/
+backups/
+config.xml
+.DS_Store
+*.zip
