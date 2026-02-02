@@ -38,6 +38,8 @@ class TranslationImporter extends Module
             $output .= $this->processUpload();
         } elseif (Tools::isSubmit('submitExportTranslations')) {
             $this->processExport();
+        } elseif (Tools::isSubmit('submitCloneContent')) {
+            $output .= $this->processCloneContent();
         }
 
         return $output . $this->renderForm();
@@ -55,20 +57,20 @@ class TranslationImporter extends Module
         if ($type === 'theme') {
             $s1 = _PS_ROOT_DIR_ . '/themes/' . $theme_name . '/translations/' . $iso_code . '/';
             if (is_dir($s1)) {
-                $files = glob($s1 . 'Modules*.xlf');
+                $files = glob($s1 . '*.xlf');
                 if ($files) $files_found = array_merge($files_found, $files);
             }
         } elseif ($type === 'core') {
             // Modern path
             $s1 = _PS_ROOT_DIR_ . '/translations/' . $iso_code . '/';
             if (is_dir($s1)) {
-                $files = glob($s1 . 'Modules*.xlf');
+                $files = glob($s1 . '*.xlf');
                 if ($files) $files_found = array_merge($files_found, $files);
             }
             // Legacy path
             $s2 = _PS_ROOT_DIR_ . '/app/Resources/translations/' . $iso_code . '/';
             if (is_dir($s2)) {
-                $files = glob($s2 . 'Modules*.xlf');
+                $files = glob($s2 . '*.xlf');
                 if ($files) $files_found = array_merge($files_found, $files);
             }
         }
@@ -158,6 +160,7 @@ class TranslationImporter extends Module
         $files = $this->getDirContents($source_dir);
         $count = 0;
         $backup_count = 0;
+        $files_log = []; // Array to store detailed log
 
         foreach ($files as $file) {
             $filename = basename($file);
@@ -216,6 +219,7 @@ class TranslationImporter extends Module
                 
                 if (copy($file, $target_file)) {
                     $count++;
+                    $files_log[] = "Moved <b>$filename</b> to <i>" . str_replace(_PS_ROOT_DIR_, '', $destination) . "</i>";
                 } else {
                     $log .= $this->displayError("Failed to copy $filename");
                 }
@@ -226,18 +230,92 @@ class TranslationImporter extends Module
         if ($backup_count > 0) {
             $msg .= '<br>' . sprintf($this->l('Backed up %d existing files to %s'), $backup_count, 'modules/' . $this->name . '/backups/' . $timestamp . '/');
         }
+
+        // Add Log Details
+        if (!empty($files_log)) {
+            $msg .= '<div class="alert alert-info" style="max-height: 200px; overflow-y: auto;">';
+            $msg .= '<h4>' . $this->l('Detailed Log:') . '</h4><ul style="list-style-type: none; padding-left: 0;">';
+            foreach ($files_log as $l) {
+                $msg .= '<li>' . $l . '</li>';
+            }
+            $msg .= '</ul></div>';
+        }
         
         return $log . $this->displayConfirmation($msg);
+    }
+
+    public function processCloneContent()
+    {
+        $from_lang_id = (int)Tools::getValue('clone_from_lang');
+        $to_lang_id = (int)Tools::getValue('clone_to_lang');
+
+        if ($from_lang_id == $to_lang_id) {
+             return $this->displayError($this->l('Source and Target languages must be different.'));
+        }
+
+        $tables = Db::getInstance()->executeS('SHOW TABLES LIKE "' . _DB_PREFIX_ . '%_lang"');
+        $count_tables = 0;
+        $log = '';
+
+        foreach ($tables as $t) {
+            $table_name = current($t); 
+            
+            // Get Columns
+            $columns = Db::getInstance()->executeS('SHOW COLUMNS FROM `' . $table_name . '`');
+            
+            $col_names = [];
+            $select_parts = [];
+            $has_id_lang = false;
+            
+            foreach ($columns as $c) {
+                $field = $c['Field'];
+                $col_names[] = '`' . $field . '`';
+                
+                if ($field == 'id_lang') {
+                    $has_id_lang = true;
+                    $select_parts[] = $to_lang_id; 
+                } else {
+                    $select_parts[] = '`' . $field . '`';
+                }
+            }
+            
+            if (!$has_id_lang) continue; 
+
+            // 1. Delete Target Data (Clean State)
+            Db::getInstance()->execute('DELETE FROM `' . $table_name . '` WHERE `id_lang` = ' . $to_lang_id);
+
+            // 2. Insert Source Data as Target
+            // Use INSERT IGNORE to be safe against some constraints, though DELETE beforehand handles most
+            $sql = 'INSERT INTO `' . $table_name . '` (' . implode(', ', $col_names) . ') 
+                    SELECT ' . implode(', ', $select_parts) . ' FROM `' . $table_name . '` 
+                    WHERE `id_lang` = ' . $from_lang_id;
+            
+            try {
+                if (Db::getInstance()->execute($sql)) {
+                    $count_tables++;
+                }
+            } catch (Exception $e) {
+                $log .= '<br/>Skipped ' . $table_name . ': ' . $e->getMessage();
+            }
+        }
+
+        return $this->displayConfirmation($this->l("Successfully cloned DB Content for $count_tables tables information.")) . 
+               ($log ? '<div class="alert alert-warning">Warnings (some tables like order_status might be skipped safely): ' . $log . '</div>' : '');
     }
 
     public function renderForm()
     {
         $languages = Language::getLanguages(false);
         $lang_options = [];
+        $lang_options_ids = [];
         foreach ($languages as $lang) {
             $lang_options[] = [
                 'id' => $lang['locale'], // Use locale like it-IT
                 'name' => $lang['name'] . ' (' . $lang['locale'] . ')'
+            ];
+            $lang_options_ids[] = [
+                'id' => $lang['id_lang'], 
+                'name' => $lang['name'] . ' (ID: ' . $lang['id_lang'] . ')' 
             ];
         }
 
@@ -345,6 +423,48 @@ class TranslationImporter extends Module
         $helper->submit_action = 'submitExportTranslations'; 
         // Note: fields_value are shared, getConfigFieldsValues includes default for both
         $out .= $helper->generateForm([$fields_form_export]);
+
+        // 3. Clone DB Form
+        $fields_form_clone = [
+            'form' => [
+                'legend' => [
+                    'title' => $this->l('Clone Language Content (DB)'),
+                    'icon' => 'icon-copy',
+                ],
+                'description' => $this->l('<b>DANGER ZONE:</b> This tool will CLONE database content (products, categories, cms, sliders) from one language to another.<br/>It iterates through all tables ending in <code>_lang</code>.<br/><span style="color:red">The Target Language content will be ERASED before copying.</span>'),
+                'input' => [
+                    [
+                        'type' => 'select',
+                        'label' => $this->l('Source Language (COPY FROM)'),
+                        'name' => 'clone_from_lang',
+                        'options' => [
+                            'query' => $lang_options_ids,
+                            'id' => 'id',
+                            'name' => 'name',
+                        ],
+                    ],
+                    [
+                        'type' => 'select',
+                        'label' => $this->l('Target Language (OVERWRITE TO)'),
+                        'name' => 'clone_to_lang',
+                        'options' => [
+                            'query' => $lang_options_ids,
+                            'id' => 'id',
+                            'name' => 'name',
+                        ],
+                    ],
+                ],
+                'submit' => [
+                    'title' => $this->l('CLONE DATABASE CONTENT'),
+                    'class' => 'btn btn-danger pull-right',
+                    'name' => 'submitCloneContent',
+                    'onclick' => "return confirm('Are you sure? This will OVERWRITE data.');"
+                ],
+            ],
+        ];
+
+        $helper->submit_action = 'submitCloneContent'; 
+        $out .= $helper->generateForm([$fields_form_clone]);
         
         return $out;
     }
@@ -357,6 +477,8 @@ class TranslationImporter extends Module
             'iso_code' => Tools::getValue('iso_code', 'it-IT'),
             'export_type' => Tools::getValue('export_type', 'theme'),
             'export_iso_code' => Tools::getValue('export_iso_code', 'it-IT'),
+            'clone_from_lang' => Tools::getValue('clone_from_lang', Context::getContext()->language->id),
+            'clone_to_lang' => Tools::getValue('clone_to_lang', 0),
         ];
     }
 
