@@ -320,12 +320,12 @@ class TranslationImporter extends Module
             'ps_feature_value_lang', 'ps_meta_lang'
         ];
         
-        // Auto-detect other _lang tables but avoid logging/stats
-        $all_tables = Db::getInstance()->executeS("SHOW TABLES LIKE '%_lang'");
+        // Auto-detect other _lang tables
+        $all_tables = Db::getInstance()->executeS("SHOW TABLES LIKE '" . _DB_PREFIX_ . "%_lang'");
         foreach ($all_tables as $t) {
             $tbl = current($t);
-             // Simple heuristic: if it starts with ps_ and ends with _lang, and not in exclude list
-            if (!in_array($tbl, $relevant_tables) && strpos($tbl, 'ps_') === 0 && strpos($tbl, 'log') === false && strpos($tbl, 'stats') === false) {
+             // Simple heuristic: not in ignore list (log/stats)
+            if (strpos($tbl, 'log') === false && strpos($tbl, 'stats') === false && strpos($tbl, 'connections') === false) {
                  $relevant_tables[] = $tbl;
             }
         }
