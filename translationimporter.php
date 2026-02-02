@@ -40,6 +40,10 @@ class TranslationImporter extends Module
             $this->processExport();
         } elseif (Tools::isSubmit('submitCloneContent')) {
             $output .= $this->processCloneContent();
+        } elseif (Tools::isSubmit('submitExportDB')) {
+            $this->processExportDB();
+        } elseif (Tools::isSubmit('submitImportDB')) {
+            $output .= $this->processImportDB();
         }
 
         return $output . $this->renderForm();
@@ -303,6 +307,113 @@ class TranslationImporter extends Module
                ($log ? '<div class="alert alert-warning">Warnings (some tables like order_status might be skipped safely): ' . $log . '</div>' : '');
     }
 
+    public function processExportDB()
+    {
+        $id_lang = (int)Tools::getValue('db_export_lang');
+        if (!$id_lang) return;
+
+        // Force check only relevant tables to avoid timeout or garbage
+        $relevant_tables = [
+            'ps_product_lang', 'ps_category_lang', 'ps_cms_lang',
+            'ps_manufacturer_lang', 'ps_supplier_lang', 'ps_homeslider_slides_lang',
+            'ps_attribute_group_lang', 'ps_attribute_lang', 'ps_feature_lang',
+            'ps_feature_value_lang', 'ps_meta_lang'
+        ];
+        
+        // Auto-detect other _lang tables but avoid logging/stats
+        $all_tables = Db::getInstance()->executeS("SHOW TABLES LIKE '%_lang'");
+        foreach ($all_tables as $t) {
+            $tbl = current($t);
+             // Simple heuristic: if it starts with ps_ and ends with _lang, and not in exclude list
+            if (!in_array($tbl, $relevant_tables) && strpos($tbl, 'ps_') === 0 && strpos($tbl, 'log') === false && strpos($tbl, 'stats') === false) {
+                 $relevant_tables[] = $tbl;
+            }
+        }
+        $relevant_tables = array_unique($relevant_tables);
+        
+        $export_data = [];
+
+        foreach ($relevant_tables as $table) {
+            // Check if table exists
+            $ch = Db::getInstance()->executeS("SHOW TABLES LIKE '$table'");
+            if (empty($ch)) continue;
+
+            // Get Primary Key
+            $columns = Db::getInstance()->executeS("SHOW KEYS FROM `$table` WHERE Key_name = 'PRIMARY'");
+            $pks = [];
+            foreach ($columns as $c) {
+                $pks[] = $c['Column_name'];
+            }
+
+            // Get Data
+            $rows = Db::getInstance()->executeS("SELECT * FROM `$table` WHERE id_lang = $id_lang");
+            
+            if (!empty($rows)) {
+                $export_data[$table] = [
+                    'pks' => $pks,
+                    'rows' => $rows
+                ];
+            }
+        }
+
+        $json = json_encode($export_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+        
+        // Download
+        header('Content-Type: application/json');
+        header('Content-Disposition: attachment; filename="db_content_lang_' . $id_lang . '.json"');
+        echo $json;
+        exit;
+    }
+
+    public function processImportDB()
+    {
+        if (isset($_FILES['db_import_file']) && $_FILES['db_import_file']['error'] == 0) {
+            $json = file_get_contents($_FILES['db_import_file']['tmp_name']);
+            $data = json_decode($json, true);
+
+            if (!$data) {
+                return $this->displayError($this->l('Invalid JSON file.'));
+            }
+
+            $count_tables = 0;
+            $count_rows = 0;
+            $db = Db::getInstance();
+
+            foreach ($data as $table => $info) {
+                $pks = $info['pks']; 
+                $rows = $info['rows'];
+                
+                // Security check
+                $table = bqSQL($table);
+                
+                foreach ($rows as $row) {
+                    $where = [];
+                    $updates = [];
+                    
+                    foreach ($row as $col => $val) {
+                        if (in_array($col, $pks)) {
+                            $where[] = "`" . bqSQL($col) . "` = '" . pSQL($val) . "'";
+                        } else {
+                            // Update content
+                            $updates[] = "`" . bqSQL($col) . "` = '" . pSQL($val, true) . "'";
+                        }
+                    }
+                    
+                    if (!empty($updates) && !empty($where)) {
+                        $sql = "UPDATE `$table` SET " . implode(', ', $updates) . " WHERE " . implode(' AND ', $where);
+                        if ($db->execute($sql)) {
+                            $count_rows++;
+                        }
+                    }
+                }
+                $count_tables++;
+            }
+            
+            return $this->displayConfirmation($this->l("Updated DB: Processed $count_tables tables and $count_rows rows."));
+        }
+        return $this->displayError($this->l('No file uploaded.'));
+    }
+
     public function renderForm()
     {
         $languages = Language::getLanguages(false);
@@ -463,8 +574,104 @@ class TranslationImporter extends Module
             ],
         ];
 
+        // Form 4: AI DB Translation (JSON)
+        $fields_form_db = [
+            'form' => [
+                'legend' => [
+                    'title' => $this->l('AI DB Auto-Translate (JSON)'),
+                    'icon' => 'icon-code',
+                ],
+                'description' => $this->l('1. Export Source Language JSON.<br/>2. Translate JSON externally (Python/AI).<br/>3. Import Result JSON (English).'),
+                'input' => [
+                    [
+                        'type' => 'select',
+                        'label' => $this->l('Export Source Language'),
+                        'name' => 'db_export_lang',
+                        'options' => [
+                            'query' => $lang_options_ids,
+                            'id' => 'id',
+                            'name' => 'name',
+                        ],
+                    ],
+                    [
+                        'type' => 'file',
+                        'label' => $this->l('Import Translated JSON'),
+                        'name' => 'db_import_file',
+                    ],
+                ],
+                'submit' => [
+                    'title' => $this->l('Import JSON'),
+                    'class' => 'btn btn-success pull-right',
+                    'name' => 'submitImportDB',
+                ],
+                // Add a custom button for Export logic via hack or separate form? HelperForm supports one submit.
+                // We will add a second submit button "Export" by injecting HTML or using separate form logic.
+                // PrestaShop HelperForm usually expects one submit. Let's make Export a separate small form or button in the same form.
+                // Simpler: Just render 4th form for Export and 5th for Import? Or combine with actions.
+                // Let's use 'submit' for Import, and add a 'desc' link for Export? No.
+                // Let's try adding a second button in 'buttons' array if PS version supports, or just rely on getContent checks.
+            ],
+        ];
+        
+        // Export DB Form
+        $fields_form_db_export = [
+            'form' => [
+                'legend' => [
+                    'title' => $this->l('Step 1: Export DB JSON'),
+                    'icon' => 'icon-cloud-download',
+                ],
+                'input' => [
+                    [
+                        'type' => 'select',
+                        'label' => $this->l('Source Language'),
+                        'name' => 'db_export_lang',
+                        'options' => [
+                            'query' => $lang_options_ids,
+                            'id' => 'id',
+                            'name' => 'name',
+                        ],
+                    ]
+                ],
+                'submit' => [
+                    'title' => $this->l('Download JSON'),
+                    'class' => 'btn btn-default',
+                    'name' => 'submitExportDB',
+                ]
+            ]
+        ];
+
+        // Import DB Form
+        $fields_form_db_import = [
+            'form' => [
+                'legend' => [
+                    'title' => $this->l('Step 2: Import DB JSON'),
+                    'icon' => 'icon-cloud-upload',
+                ],
+                'input' => [
+                    [
+                        'type' => 'file',
+                        'label' => $this->l('Translated JSON File'),
+                        'name' => 'db_import_file',
+                    ]
+                ],
+                'submit' => [
+                    'title' => $this->l('Import JSON to DB'),
+                    'class' => 'btn btn-success',
+                    'name' => 'submitImportDB',
+                ]
+            ]
+        ];
+
         $helper->submit_action = 'submitCloneContent'; 
         $out .= $helper->generateForm([$fields_form_clone]);
+        
+        // DB Export
+        $helper->submit_action = 'submitExportDB';
+        $out .= $helper->generateForm([$fields_form_db_export]);
+
+        // DB Import
+        $helper->submit_action = 'submitImportDB';
+        $out .= $helper->generateForm([$fields_form_db_import]);
         
         return $out;
     }
@@ -479,6 +686,7 @@ class TranslationImporter extends Module
             'export_iso_code' => Tools::getValue('export_iso_code', 'it-IT'),
             'clone_from_lang' => Tools::getValue('clone_from_lang', Context::getContext()->language->id),
             'clone_to_lang' => Tools::getValue('clone_to_lang', 0),
+            'db_export_lang' => Tools::getValue('db_export_lang', Context::getContext()->language->id),
         ];
     }
 
