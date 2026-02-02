@@ -36,9 +36,77 @@ class TranslationImporter extends Module
 
         if (Tools::isSubmit('submitImportTranslations')) {
             $output .= $this->processUpload();
+        } elseif (Tools::isSubmit('submitExportTranslations')) {
+            $this->processExport();
         }
 
         return $output . $this->renderForm();
+    }
+
+    public function processExport()
+    {
+        $iso_code = Tools::getValue('export_iso_code', 'it-IT');
+        $type = Tools::getValue('export_type', 'theme');
+        $theme_name = Context::getContext()->shop->theme->getName();
+        
+        $files_found = [];
+        
+        // Define sources based on type
+        if ($type === 'theme') {
+            $s1 = _PS_ROOT_DIR_ . '/themes/' . $theme_name . '/translations/' . $iso_code . '/';
+            if (is_dir($s1)) {
+                $files = glob($s1 . 'Modules*.xlf');
+                if ($files) $files_found = array_merge($files_found, $files);
+            }
+        } elseif ($type === 'core') {
+            // Modern path
+            $s1 = _PS_ROOT_DIR_ . '/translations/' . $iso_code . '/';
+            if (is_dir($s1)) {
+                $files = glob($s1 . 'Modules*.xlf');
+                if ($files) $files_found = array_merge($files_found, $files);
+            }
+            // Legacy path
+            $s2 = _PS_ROOT_DIR_ . '/app/Resources/translations/' . $iso_code . '/';
+            if (is_dir($s2)) {
+                $files = glob($s2 . 'Modules*.xlf');
+                if ($files) $files_found = array_merge($files_found, $files);
+            }
+        }
+        
+        if (empty($files_found)) {
+             $output = $this->displayError($this->l('No translation files found for this selection.'));
+             return $output;
+        }
+
+        $zip_filename = 'translations_export_' . $type . '_' . $iso_code . '_' . date('Y-m-d_H-i-s') . '.zip';
+        $zip_path = _PS_MODULE_DIR_ . $this->name . '/tmp/' . $zip_filename;
+        
+        if (!is_dir(dirname($zip_path))) {
+            mkdir(dirname($zip_path), 0777, true);
+        }
+
+        $zip = new ZipArchive();
+        if ($zip->open($zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE) === TRUE) {
+            foreach ($files_found as $file) {
+                // Keep the filename flat in the zip for easy re-import
+                $zip->addFile($file, basename($file));
+            }
+            $zip->close();
+            
+            // Trigger Download
+            if (file_exists($zip_path)) {
+                header('Content-Type: application/zip');
+                header('Content-Disposition: attachment; filename="' . $zip_filename . '"');
+                header('Content-Length: ' . filesize($zip_path));
+                // Clean output buffer to ensure valid zip
+                if (ob_get_level()) ob_end_clean();
+                readfile($zip_path);
+                unlink($zip_path); // Delete after download
+                exit;
+            }
+        } else {
+            return $this->displayError($this->l('Could not create ZIP file.'));
+        }
     }
 
     public function processUpload()
@@ -106,14 +174,23 @@ class TranslationImporter extends Module
                 // Force copy to theme folder
                 $destination = _PS_ROOT_DIR_ . '/themes/' . $theme_name . '/translations/' . $iso_code . '/';
             } elseif ($type === 'core') {
-                // Force copy to core folder
-                $destination = _PS_ROOT_DIR_ . '/app/Resources/translations/' . $iso_code . '/';
+                // PrestaShop 8/9+ vs 1.7
+                if (is_dir(_PS_ROOT_DIR_ . '/translations/')) {
+                    $destination = _PS_ROOT_DIR_ . '/translations/' . $iso_code . '/';
+                } else {
+                    $destination = _PS_ROOT_DIR_ . '/app/Resources/translations/' . $iso_code . '/';
+                }
             } else {
                 // Auto-detect based on folder structure in ZIP or Filename
                 if (strpos($file, 'Theme') !== false || strpos($filename, 'Shop') === 0) {
                      $destination = _PS_ROOT_DIR_ . '/themes/' . $theme_name . '/translations/' . $iso_code . '/';
                 } elseif (strpos($file, 'prestashop') !== false || strpos($filename, 'Admin') === 0) {
-                     $destination = _PS_ROOT_DIR_ . '/app/Resources/translations/' . $iso_code . '/';
+                     // Auto-detect core path
+                     if (is_dir(_PS_ROOT_DIR_ . '/translations/')) {
+                         $destination = _PS_ROOT_DIR_ . '/translations/' . $iso_code . '/';
+                     } else {
+                         $destination = _PS_ROOT_DIR_ . '/app/Resources/translations/' . $iso_code . '/';
+                     }
                 } else {
                     // Default fallback
                     $destination = _PS_ROOT_DIR_ . '/themes/' . $theme_name . '/translations/' . $iso_code . '/';
@@ -211,6 +288,45 @@ class TranslationImporter extends Module
             ],
         ];
 
+        $fields_form_export = [
+            'form' => [
+                'legend' => [
+                    'title' => $this->l('Export Module Translations (XLF)'),
+                    'icon' => 'icon-download',
+                ],
+                'input' => [
+                    [
+                        'type' => 'select',
+                        'label' => $this->l('Export Source'),
+                        'name' => 'export_type',
+                        'options' => [
+                            'query' => [
+                                ['id' => 'theme', 'name' => $this->l('Theme Modules (themes/YOUR_THEME/translations/...)')],
+                                ['id' => 'core', 'name' => $this->l('Core / Installed Modules (translations/...)')],
+                            ],
+                            'id' => 'id',
+                            'name' => 'name',
+                        ],
+                    ],
+                    [
+                        'type' => 'select',
+                        'label' => $this->l('Language'),
+                        'name' => 'export_iso_code',
+                        'options' => [
+                            'query' => $lang_options,
+                            'id' => 'id',
+                            'name' => 'name',
+                        ],
+                    ],
+                ],
+                'submit' => [
+                    'title' => $this->l('Export to ZIP'),
+                    'class' => 'btn btn-default pull-right',
+                    'name' => 'submitExportTranslations',
+                ],
+            ],
+        ];
+
         $helper = new HelperForm();
         $helper->module = $this;
         $helper->name_controller = $this->name;
@@ -218,10 +334,19 @@ class TranslationImporter extends Module
         $helper->currentIndex = AdminController::$currentIndex . '&configure=' . $this->name;
         $helper->default_form_language = (int) Configuration::get('PS_LANG_DEFAULT');
         $helper->title = $this->displayName;
+        
         $helper->submit_action = 'submitImportTranslations';
         $helper->fields_value = $this->getConfigFieldsValues();
         
-        return $helper->generateForm([$fields_form]);
+        // Render Import Form
+        $out = $helper->generateForm([$fields_form]);
+        
+        // Setup for Export Form
+        $helper->submit_action = 'submitExportTranslations'; 
+        // Note: fields_value are shared, getConfigFieldsValues includes default for both
+        $out .= $helper->generateForm([$fields_form_export]);
+        
+        return $out;
     }
 
     public function getConfigFieldsValues()
@@ -230,6 +355,8 @@ class TranslationImporter extends Module
             'import_zip' => '',
             'target_type' => Tools::getValue('target_type', 'auto'),
             'iso_code' => Tools::getValue('iso_code', 'it-IT'),
+            'export_type' => Tools::getValue('export_type', 'theme'),
+            'export_iso_code' => Tools::getValue('export_iso_code', 'it-IT'),
         ];
     }
 
