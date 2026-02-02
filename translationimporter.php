@@ -312,20 +312,28 @@ class TranslationImporter extends Module
         $id_lang = (int)Tools::getValue('db_export_lang');
         if (!$id_lang) return;
 
-        // Force check only relevant tables to avoid timeout or garbage
+        // Dynamically build relevant tables with correct prefix
+        $p = _DB_PREFIX_;
         $relevant_tables = [
-            'ps_product_lang', 'ps_category_lang', 'ps_cms_lang',
-            'ps_manufacturer_lang', 'ps_supplier_lang', 'ps_homeslider_slides_lang',
-            'ps_attribute_group_lang', 'ps_attribute_lang', 'ps_feature_lang',
-            'ps_feature_value_lang', 'ps_meta_lang'
+            $p.'product_lang', $p.'category_lang', $p.'cms_lang',
+            $p.'manufacturer_lang', $p.'supplier_lang', $p.'homeslider_slides_lang',
+            $p.'attribute_group_lang', $p.'attribute_lang', $p.'feature_lang',
+            $p.'feature_value_lang', $p.'meta_lang'
         ];
         
         // Auto-detect other _lang tables
         $all_tables = Db::getInstance()->executeS("SHOW TABLES LIKE '" . _DB_PREFIX_ . "%_lang'");
         foreach ($all_tables as $t) {
-            $tbl = current($t);
-             // Simple heuristic: not in ignore list (log/stats)
-            if (strpos($tbl, 'log') === false && strpos($tbl, 'stats') === false && strpos($tbl, 'connections') === false) {
+            $tbl = current($t); // e.g. ei3l_custom_lang
+            
+            // Simple heuristic to include other tables but avoid logs/stats/connections
+            if (
+                !in_array($tbl, $relevant_tables) && 
+                strpos($tbl, 'log') === false && 
+                strpos($tbl, 'stats') === false && 
+                strpos($tbl, 'connections') === false &&
+                strpos($tbl, 'guest') === false 
+            ) {
                  $relevant_tables[] = $tbl;
             }
         }
