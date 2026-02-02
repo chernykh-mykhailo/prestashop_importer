@@ -47,8 +47,8 @@ class TranslationImporter extends Module
             return $this->displayError($this->l('Please upload a valid ZIP file.'));
         }
 
-        $target_type = Tools::getValue('target_type'); // theme, core, auto
-        $iso_code = Tools::getValue('iso_code'); // it-IT
+        $target_type = Tools::getValue('target_type', 'auto'); // theme, core, auto (default: auto)
+        $iso_code = Tools::getValue('iso_code', 'it-IT'); // it-IT (default)
         
         $zip_file = $_FILES['import_zip']['tmp_name'];
         $zip = new ZipArchive;
@@ -75,7 +75,6 @@ class TranslationImporter extends Module
             Tools::clearSmartyCache();
             Tools::clearXMLCache();
             Media::clearCache();
-            Tools::generateIndex();
             
             return $log;
         } else {
@@ -220,8 +219,18 @@ class TranslationImporter extends Module
         $helper->default_form_language = (int) Configuration::get('PS_LANG_DEFAULT');
         $helper->title = $this->displayName;
         $helper->submit_action = 'submitImportTranslations';
+        $helper->fields_value = $this->getConfigFieldsValues();
         
         return $helper->generateForm([$fields_form]);
+    }
+
+    public function getConfigFieldsValues()
+    {
+        return [
+            'import_zip' => '',
+            'target_type' => Tools::getValue('target_type', 'auto'),
+            'iso_code' => Tools::getValue('iso_code', 'it-IT'),
+        ];
     }
 
     private function getDirContents($dir, &$results = array()) {
