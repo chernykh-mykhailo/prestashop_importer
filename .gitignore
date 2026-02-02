@@ -4,3 +4,7 @@ backups/
 config.xml
 .DS_Store
 *.zip
+
+*.json
+*.zip
+import_files/
